@@ -1,0 +1,459 @@
+Libraries
+```{r,quiet=TRUE}
+library(vegan)
+library(ggplot2)
+library(phyloseq)
+library(ape)
+library(ade4)
+library(picante)
+library(matrixStats)
+library(adespatial)
+library(spdep)
+```
+
+Start with a rarefied or otherwise normalized phyloseq object/ASV table
+PCoA on untransformed rarefied data: Bray-Curtis dissimilarity, Cailliez correction to avoid negative eigenvalues
+```{r}
+tabrednew<-otu_table(ps)#extract ASV table
+out.brayrare<-vegdist(tabrednew,"bray")#first find bray dissimilarity
+out.brayrare.pcoa<-pcoa(out.brayrare,correction="cailliez")#correct negative eigenvalues using cailliez
+```
+
+Distance-decay curves
+Plot community distance against geographic distance: the idea is that if you have isolation by distance, communities further apart should be less similar
+```{r}
+#rarefied_data
+distance<-read.table("dist.txt",h=T,row.names=1)#table with geographic distances between samples
+colnames(distance)<-row.names(distance)
+inclus<-as.vector(row.names(tabrednew))#match community dstances with geographic distances to ensure that both tables have the same dimensions
+distred<-distance[row.names(distance) %in% inclus,]
+distred<-distred[,colnames(distred) %in% inclus]
+names(distred)<-row.names(distred)
+dista_all<-as.dist(distred)#convert distance table to dist object
+cor_dis<-mantel.correlog(out.brayrare,dista_all,progressive=TRUE)#you can plot this
+mantel.rtest(out.brayrare,dista_all,nrepet=9999)#increased dissimilarity with increased distance
+
+```
+
+Distance decay curves for high, medium, low, high lakes: are there differences in distance decay curves between differentially impacted samples
+```{r}
+envrare<-sample_data(ps)
+env_cut<-envrare[,9]
+row.names(env_cut)<-envrare$sampleid
+
+#subset and run analyses for each class of HII
+env_low<-subset(env_cut,HumanImpactIndex<=0.1)
+low<-as.vector(row.names(env_low))
+dist_low<-distred[row.names(distred) %in% low,]
+dist_low<-dist_low[,colnames(dist_low) %in% low]
+dis_low<-as.dist(dist_low)#subset and prepare geographic distance table
+
+tab_low<-tabrednew[row.names(tabrednew) %in% low,]
+out.braylow<-vegdist(tab_low,"bray")
+cor_low<-mantel.correlog(out.braylow,dis_low,progressive=TRUE)
+mantel.rtest(out.braylow,dis_low,nrepet=9999)
+
+env_moderate<-subset(env_cut,HumanImpactIndex>0.1& HumanImpactIndex<=0.5)
+moderate<-as.vector(row.names(env_moderate))
+dist_moderate<-distred[row.names(distred) %in% moderate,]
+dist_moderate<-dist_moderate[,colnames(dist_moderate) %in% moderate]
+dis_mod<-as.dist(dist_moderate)
+
+tab_moderate<-tabrednew[row.names(tabrednew) %in% moderate,]
+out.braymod<-vegdist(tab_moderate,"bray")
+cor_mod<-mantel.correlog(out.braymod,dis_mod,progressive=TRUE)
+mantel.rtest(out.braymod,dis_mod,nrepet=9999)
+
+env_high<-subset(env_cut,HumanImpactIndex>0.5)
+high<-as.vector(row.names(env_high))
+dist_high<-distred[row.names(distred) %in% high,]
+dist_high<-dist_high[,colnames(dist_high) %in% high]
+dis_high<-as.dist(dist_high)
+
+tab_high<-tabrednew[row.names(tabrednew) %in% high,]
+out.brayhigh<-vegdist(tab_high,"bray")
+cor_high<-mantel.correlog(out.brayhigh,dis_high,progressive=TRUE)
+mantel.rtest(out.brayhigh,dis_high,nrepet=9999)
+```
+
+
+Community assembly processes
+```{r}
+#remove rare taxa (abundance < 500)
+pslab<-prune_taxa(taxa_sums(ps)>=500,ps)#facilitates analyses
+tree<-phy_tree(pslab)#pull out the tree for picante
+comm<-otu_table(pslab)
+phydist<-cophenetic(tree)#this will translate ASVs position on tree into cophenetic distances between all ASVs
+```
+
+Community assembly analysis relies on the assumption that phylogenetic distance is correlated with ecological distance. To test this we look into whether the phylogenetic distance and the differences in abundances of ASVs are (somewhat) correlated.
+Plot ecological distance against phylogenetic distance
+```{r}
+#ecological distance
+out.braylab<-vegdist(t(otu_table(pslab)))
+#phylogenetic distance: phydist
+
+cor<-mantel.correlog(out.braylab,phydist,progressive=TRUE)#look at the plot, when does the relationship break down?
+
+phydist_dist<-as.dist(phydist)
+mantel.rtest(out.braylab,phydist_dist,nrepet=9999)#is this significant
+#phylogenetic signal over part of space sampled (distance class index 0.4->e.g. ASVs with x amount of genetic similarity are ecologically similar)
+```
+
+Calculate beta-MNTB (inter-community mean nearest taxon distance)
+```{r}
+MNTDresult<-comdistnt(comm,phydist,abundance.weighted=TRUE)#this calculates the average phylogenetic distance to the most similar ASV in the other community for each ASV
+
+#The whole next part determines how the real result we just obtained compares to randomized data
+reps<-999
+res<-matrix(,nrow=21945,ncol=999)#nrow is the length of all possible comparisons so (#samples*(#samples-1))
+for(i in 1:reps) {
+    temp <- tree#take the original tree
+    randtips <- sample(temp$tip.label, length(temp$tip.label))#switch the tip labels around
+    temp$tip.label <- randtips
+    temp_phydist<-cophenetic(temp)#get the cophenetic distance of your tree with the random labels
+    temp_comm<-comm#get the ASV_table
+    randname<-sample(colnames(temp_comm), length(colnames(temp_comm)))#switch the ASV labels on the abundance table
+    colnames(temp_comm)<-randname
+    nulltemp<-comdistnt(temp_comm,temp_phydist,abundance.weighted=TRUE)#get MNTD result from randomiazed data
+    #print(head(nulltemp))
+    m <- data.frame(t(combn(rownames(temp_comm),2)), as.numeric(nulltemp))#put the permutated values in a data frame
+    names(m) <- c("c1", "c2", "nulltemp")
+    res[,i]<-m$nulltemp#fuse the column to your result dataframe and repeat 999 times
+}
+```
+
+
+Mean and sd of MNTD null distribution
+```{r}
+sdMNTD<-rowSds(res)
+MNTDmean<-rowMeans(res)
+real<-as.vector(MNTDresult)
+MNTDsum<-cbind.data.frame(m$c1,m$c2,sdMNTD,MNTDmean,real)
+MNTDsum$beta<-(MNTDsum$real-MNTDsum$MNTDmean)/MNTDsum$sdMNTD#compare real to average permutated value
+```
+
+Calculate Raup-Crick (This function is taken from Stegen et al. 2013)
+
+Function:
+```{r}
+raup_crick=function(spXsite, plot_names_in_col1=TRUE, classic_metric=FALSE, split_ties=TRUE, reps=9999, set_all_species_equal=FALSE, as.distance.matrix=TRUE, report_similarity=FALSE){
+	
+	##expects a species by site matrix for spXsite, with row names for plots, or optionally plots named in column 1.  By default calculates a modification of the Raup-Crick metric (standardizing the metric to range from -1 to 1 instead of 0 to 1). Specifying classic_metric=TRUE instead calculates the original Raup-Crick metric that ranges from 0 to 1. The option split_ties (defaults to TRUE) adds half of the number of null observations that are equal to the observed number of shared species to the calculation- this is highly recommended.  The argument report_similarity defaults to FALSE so the function reports a dissimilarity (which is appropriate as a measure of beta diversity).  Setting report_similarity=TRUE returns a measure of similarity, as Raup and Crick originally specified.  If ties are split (as we recommend) the dissimilarity (default) and similarity (set report_similarity=TRUE) calculations can be flipped by multiplying by -1 (for our modification, which ranges from -1 to 1) or by subtracting the metric from 1 (for the classic metric which ranges from 0 to 1). If ties are not split (and there are ties between the observed and expected shared number of species) this conversion will not work. The argument reps specifies the number of randomizations (a minimum of 999 is recommended- default is 9999).  set_all_species_equal weights all species equally in the null model instead of weighting species by frequency of occupancy.  
+	
+	
+	##Note that the choice of how many plots (rows) to include has a real impact on the metric, as species and their occurrence frequencies across the set of plots is used to determine gamma and the frequency with which each species is drawn from the null model	
+	
+	
+	##this section moves plot names in column 1 (if specified as being present) into the row names of the matrix and drops the column of names
+	if(plot_names_in_col1){
+		row.names(spXsite)<-spXsite[,1]
+		spXsite<-spXsite[,-1]
+		}
+	
+	
+	## count number of sites and total species richness across all plots (gamma)
+	n_sites<-nrow(spXsite)
+	gamma<-ncol(spXsite)
+	
+	##make the spXsite matrix into a pres/abs. (overwrites initial spXsite matrix):
+	ceiling(spXsite/max(spXsite))->spXsite
+	
+	##create an occurrence vector- used to give more weight to widely distributed species in the null model:
+	occur<-apply(spXsite, MARGIN=2, FUN=sum)
+	
+	
+	##NOT recommended- this is a non-trivial change to the metric:
+	##sets all species to occur with equal frequency in the null model
+	##e.g.- discards any occupancy frequency information
+	if(set_all_species_equal){
+		occur<-rep(1,gamma)
+		}
+	
+	
+	## determine how many unique species richness values are in the dataset
+	##this is used to limit the number of null communities that have to be calculated
+	alpha_levels<-sort(unique(apply(spXsite, MARGIN=1, FUN=sum)))
+	
+	##make_null:
+	
+	##alpha_table is used as a lookup to help identify which null distribution to use for the tests later.  It contains one row for each combination of alpha richness levels. 
+	
+	alpha_table<-data.frame(c(NA), c(NA))
+	names(alpha_table)<-c("smaller_alpha", "bigger_alpha")
+	col_count<-1
+	
+	##null_array will hold the actual null distribution values.  Each element of the array corresponds to a null distribution for each combination of alpha values.  The alpha_table is used to point to the correct null distribution- the row numbers of alpha_table correspond to the [[x]] indices of the null_array.  Later the function will find the row of alpha_table with the right combination of alpha values.  That row number is used to identify the element of null_array that contains the correct null distribution for that combination of alpha levels. 
+	
+	
+	null_array<-list()
+	
+	##looping over each combination of alpha levels:
+	
+	for(a1 in 1:length(alpha_levels)){
+		for(a2 in a1:length(alpha_levels)){
+			
+			##build a null distribution of the number of shared species for a pair of alpha values:
+			null_shared_spp<-NULL
+			for(i in 1:reps){
+				
+				##two empty null communities of size gamma:
+				com1<-rep(0,gamma)
+				com2<-rep(0,gamma)
+				
+				##add alpha1 number of species to com1, weighting by species occurrence frequencies:
+				com1[sample(1:gamma, alpha_levels[a1], replace=FALSE, prob=occur)]<-1
+				
+				
+				##same for com2:
+				com2[sample(1:gamma, alpha_levels[a2], replace=FALSE, prob=occur)]<-1
+				
+				##how many species are shared in common?
+				null_shared_spp[i]<-sum((com1+com2)>1)
+				
+				}
+			
+			
+			##store null distribution, record values for alpha 1 and 2 in the alpha_table to help find the correct null distribution later:
+			null_array[[col_count]]<-null_shared_spp
+			
+			alpha_table[col_count, which(names(alpha_table)=="smaller_alpha")]<-alpha_levels[a1]
+			alpha_table[col_count, which(names(alpha_table)=="bigger_alpha")]<-alpha_levels[a2]
+			
+			#increment the counter for the columns of the alpha table/ elements of the null array
+			col_count<-col_count+1
+			
+			
+			
+			}
+	
+		}
+	
+	##create a new column with both alpha levels to match on:
+	alpha_table$matching<-paste(alpha_table[,1], alpha_table[,2], sep="_")
+	
+	
+	#####################
+	##do the test:
+	
+	
+	
+	##build a site by site matrix for the results, with the names of the sites in the row and col names:
+	results<-matrix(data=NA, nrow=n_sites, ncol=n_sites, dimnames=list(row.names(spXsite), row.names(spXsite)))
+	
+	
+	##for each pair of sites (duplicates effort now to make a full matrix instead of a half one- but this part should be minimal time as compared to the null model building)
+	for(i in 1:n_sites){
+		for(j in 1:n_sites){
+			
+			##how many species are shared between the two sites:
+			n_shared_obs<-sum((spXsite[i,]+spXsite[j,])>1)
+			
+			## what was the observed richness of each site?
+			obs_a1<-sum(spXsite[i,])
+			obs_a2<-sum(spXsite[j,])
+			
+			##place these alphas into an object to match against alpha_table (sort so smaller alpha is first)
+			obs_a_pair<-sort(c(obs_a1, obs_a2))
+			
+			##match against the alpha table- row index identifies which element of the null array contains the correct null distribution for the observed combination of alpha values:
+			null_index<-which(alpha_table$matching==paste(obs_a_pair[1], obs_a_pair[2], sep="_"))
+			
+			##how many null observations is the observed value tied with?
+			num_exact_matching_in_null<-sum(null_array[[null_index]]==n_shared_obs)
+			
+			##how many null values are bigger than the observed value?
+			num_greater_in_null<-sum(null_array[[null_index]]>n_shared_obs)
+			
+			
+			
+			rc<-(num_greater_in_null)/reps
+			
+		
+			
+			
+			if(split_ties){
+				
+				rc<-((num_greater_in_null+(num_exact_matching_in_null)/2)/reps)
+				}
+			
+			
+			
+			if(!classic_metric){
+					
+					##our modification of raup crick standardizes the metric to range from -1 to 1 instead of 0 to 1
+					
+					rc<-(rc-.5)*2
+			}
+			
+			
+			## at this point rc represents an index of dissimilarity- multiply by -1 to convert to a similarity as specified in the original 1979 Raup Crick paper
+			if(report_similarity & !classic_metric){
+				rc<- rc*-1
+				}
+			
+			## the switch to similarity is done differently if the original 0 to 1 range of the metric is used:
+			if(report_similarity & classic_metric){
+				rc<- 1-rc
+				}
+			
+			
+			##store the metric in the results matrix:
+			results[i,j]<-round(rc, digits=2)
+			
+			
+			}
+		}
+
+	
+if(as.distance.matrix){
+	results<-as.dist(results)
+	}	
+	
+	
+return(results)
+	
+	
+	
+	
+	
+	}
+```
+
+
+```{r}
+RCbeta<-raup_crick(comm,plot_names_in_col1 = FALSE)#Calculate RC-Bray on your ASV table
+RCbetavec<-as.vector(RCbeta)
+all_process<-cbind.data.frame(MNTDsum,RCbetavec)#combine selection and ecological drift measures for each comparison of sites
+```
+
+Calculate relative importance of processes
+```{r}
+dim(all_process)
+selection<-(sum(all_process$beta > 2) + sum(all_process$beta < -2))/length(all_process$beta)#|2| is the magic border (according to Stegen and references therein) that delineates when differences between communities are caused by selwection or eco drift
+hom_selection<-sum(all_process$beta < -2)/21945
+het_selection<-sum(all_process$beta > 2)/21945
+not_selection<-subset(all_process,beta > -2 & beta < 2)
+dispersal_limitation<-sum(not_selection$RCbetavec > 0.95)/21945
+hom_dispersal<-sum(not_selection$RCbetavec < -0.95)/21945
+eco_drift<-(sum(not_selection$RCbetavec >= -0.95 & not_selection$RCbetavec <= 0.95))/21945
+#make pie chart
+slices<-c(12.3,16,39.1,31.3)
+lb<-c("Selection","Dispersal Limitation","Hom. Dispersal","Eco. Drift")
+pie(slices,labels=lb)
+```
+
+
+Factors that impose selection: Connect your selection and drift values to the environmental PCs
+Calculate spatial eigenvectors
+```{r}
+distance<-read.table("dist_red.txt",h=T,row.names=1)
+names(distance)<-row.names(distance)
+dista<-as.dist(distance)#make distance a true distance object
+MEMs<-dbmem(dista,store.listw=TRUE)
+test.MEM<-moran.randtest(MEMs,nrepe=999)
+spat<-scores(MEMs,choices=c(1:6))#first 6 picked based on distribution of eigenvalues (much more are significant)
+row.names(spat)<-row.names(distance)
+```
+
+```{r}
+meta<-read.table("meta_master.txt",h=T)
+row.names(meta)<-meta$Lake_ID
+keep<-sample_names(pslab)
+meta_shorter<-meta[rownames(meta) %in% keep,]
+meta_pcnm<-merge(spat,meta_shorter,by="row.names",all.x=FALSE)
+row.names(meta_pcnm)<-meta_pcnm$Row.names
+meta_pcnm$Row.names<-NULL
+env_cur<-meta_pcnm[c(1:6,13,14,25:32,43,49)]#contains first 6 MEMs, area, depth,ions, DIC, DOC, O2 conc, TN (or whatwever env. variables you are interested in)
+
+
+#PCA of env factors
+env_cur2<-na.omit(env_cur)#167 lakes remain
+env_cur.pca<-rda(env_cur2,scale=TRUE)
+summary(env_cur.pca)
+ev_cur<-env_cur.pca$CA$eig
+PCs<-env_cur.pca$CA$u
+PCnames<-rownames(PCs)
+load<-scores(env_cur.pca, choices = 1:18, display = "species", scaling = 0)
+```
+
+
+Environmental factors that impose selection
+```{r}
+#Remove lakes for which we don't have PCs, then normalize betaMNTD and convert to distance matrix
+beta_mat<-MNTDsum[c(1:2,6)]
+names(beta_mat)<-c("c1","c2","beta")
+beta_mat2<-subset(beta_mat,c1 %in% PCnames)
+beta_mat3<-subset(beta_mat2,c2 %in% PCnames)
+min(beta_mat3$beta)
+beta_mat3$betanorm1<-beta_mat3$beta+3.530332#add minimum to make all betas positive
+max(beta_mat3$betanorm1)
+beta_mat3$betanorm<-beta_mat3$betanorm1/9.488149#beta now positive between 0 and 1
+
+
+dij2 <- with(beta_mat3, betanorm)
+nams <- with(beta_mat3,unique(c(as.character(beta_mat3$c1),as.character(beta_mat3$c2))))
+attributes(dij2) <- with(beta_mat3, list(Size = length(nams),
+                                  Labels = nams,
+                                  Diag = FALSE,
+                                  Upper = FALSE,
+                                  method = "user"))#this is a way to make a distance matrix if the dist function fails
+class(dij2) <- "dist"
+```
+
+db-RDA with forward selection of factors signficiantly correlated with selection
+```{r}
+PCs1<-as.data.frame(PCs)
+dbrda<-capscale(dij2~.,data=PCs1)#test overall model
+anova.cca(dbrda,step=1000)#significant
+vif.cca(dbrda)#test vifs, should be <<10
+step.forward<-ordiR2step(capscale(dij2~1,data=PCs1),scope=formula(dbrda),direction="forward",pstep=1000)
+```
+
+Factors that impose dispersal limitation
+```{r}
+#Remove lakes for which we don't have PCs, then normalize RC-Bray and convert to distance matrix
+RC_mat<-all_process[c(1:2,7)]
+names(RC_mat)<-c("c1","c2","RC")
+RC_mat2<-subset(RC_mat,c1 %in% PCnames)
+RC_mat3<-subset(RC_mat2,c2 %in% PCnames)
+min(RC_mat3$RC)
+RC_mat3$RCnorm1<-(RC_mat3$RC+1)
+max(RC_mat3$RCnorm1)
+RC_mat3$RCnorm<-RC_mat3$RCnorm1/2
+
+dij3 <- with(RC_mat3, RCnorm)
+nams <- with(RC_mat3,unique(c(as.character(RC_mat3$c1),as.character(RC_mat3$c2))))
+attributes(dij3) <- with(RC_mat3, list(Size = length(nams),
+                                  Labels = nams,
+                                  Diag = FALSE,
+                                  Upper = FALSE,
+                                  method = "user"))
+class(dij3) <- "dist"
+
+dbrda_RC<-capscale(dij3~.,data=PCs1)
+anova.cca(dbrda_RC,step=1000)
+vif.cca(dbrda_RC)
+step.forward_RC<-ordiR2step(capscale(dij3~1,data=PCs1),scope=formula(dbrda_RC),direction="forward",pstep=1000)
+
+#Look for PCs that are implicated in selection model, but not in drift model: those are probably driving selection (to some degree)
+```
+
+#Looking for generalists and specialists
+```{r}
+transf<-transform_sample_counts(psl, function(x) x / sum(x) )
+prevdf = apply(X = otu_table(transf),
+                 MARGIN = ifelse(taxa_are_rows(transf), yes = 1, no = 2),
+                 FUN = function(x){sum(x > 0)})
+# Add taxonomy and total read counts to this data.frame
+prevdf = data.frame(Prevalence = prevdf,
+                      TotalAbundance = colMeans(otu_table(transf)),
+                      tax_table(transf))
+
+genkeepTaxa<-subset(prevdf,Prevalence>=158)
+speckeeptaxa<-subset(prevdf,Prevalence<=21 & TotalAbundance>=0.02)
+```
+
+
+
+
